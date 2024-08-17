@@ -1,0 +1,7 @@
+name: test
+tasks:
+- name: cargo-test
+  steps:
+  - args:
+    - cargo
+    - test

@@ -1,0 +1,9 @@
+name: build
+depends:
+- test
+tasks:
+- name: cargo-build
+  steps:
+  - args:
+    - cargo
+    - build
