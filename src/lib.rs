@@ -40,7 +40,7 @@ impl From<serde_yml::Error> for Error {
 }
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Job {
     pub name: String,
     #[serde(default)]
@@ -48,17 +48,6 @@ pub struct Job {
     pub tasks: Vec<Task>,
     #[serde(default)]
     pub status: Status,
-}
-
-impl Clone for Job {
-    fn clone(&self) -> Job {
-        Job {
-            name: self.name.clone(),
-            depends: self.depends.clone(),
-            tasks: self.tasks.clone(),
-            status: self.status.clone(),
-        }
-    }
 }
 
 impl Job {
@@ -310,23 +299,12 @@ impl Runner {
 }
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub enum Status {
     Pending,
     Running,
     Finished,
     Failed,
-}
-
-impl Clone for Status {
-    fn clone(&self) -> Status {
-        match self {
-            Status::Pending => Status::Pending,
-            Status::Running => Status::Running,
-            Status::Finished => Status::Finished,
-            Status::Failed => Status::Failed,
-        }
-    }
 }
 
 impl Default for Status {
@@ -335,33 +313,11 @@ impl Default for Status {
     }
 }
 
-impl PartialEq for Status {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Status::Pending, Status::Pending) => true,
-            (Status::Running, Status::Running) => true,
-            (Status::Finished, Status::Finished) => true,
-            (Status::Failed, Status::Failed) => true,
-            _ => false,
-        }
-    }
-}
 
-
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(untagged)]
 pub enum Step {
     Command{args: Vec<String>},
-}
-
-impl Clone for Step {
-    fn clone(&self) -> Step {
-        match self {
-            Step::Command { args } => Step::Command {
-                args: args.clone(),
-            },
-        }
-    }
 }
 
 impl Step {
@@ -411,7 +367,7 @@ impl Step {
 }
 
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Task {
     pub name: String,
     #[serde(default)]
@@ -419,17 +375,6 @@ pub struct Task {
     pub steps: Vec<Step>,
     #[serde(default)]
     pub status: Status,
-}
-
-impl Clone for Task {
-    fn clone(&self) -> Task {
-        Task {
-            name: self.name.clone(),
-            depends: self.depends.clone(),
-            steps: self.steps.clone(),
-            status: self.status.clone(),
-        }
-    }
 }
 
 impl Task {
