@@ -1,21 +1,23 @@
 use serde::Deserialize;
+use tokio::io::AsyncBufReadExt;
 
 
 #[derive(Debug)]
 pub enum Error {
-    CircularOrMissingDependencies,
-    JobFailed(Job),
-    TaskFailed(Task),
+    CircularDependency,
     Exit(std::process::ExitStatus),
     Io(std::io::Error),
+    JobFailed(Job),
+    MissingDependency(String),
     Serde(serde_yml::Error),
+    TaskFailed(Task),
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Error::CircularOrMissingDependencies =>
-                write!(f, "Circular or missing dependencies"),
+            Error::CircularDependency => write!(f, "Circular dependency detected"),
+            Error::MissingDependency(name) => write!(f, "Missing dependency: {}", name),
             Error::JobFailed(job) => write!(f, "Job failed: {}", job.name),
             Error::TaskFailed(task) => write!(f, "Task failed: {}", task.name),
             Error::Exit(status) => write!(f, "Exit status: {}", status),
@@ -84,6 +86,16 @@ impl Job {
     pub async fn run(&mut self) -> Result<(), Error> {
         self.status = Status::Running;
 
+        // Check if all dependencies are available
+        for task in &self.tasks {
+            for name in &task.depends {
+                if !self.tasks.iter().any(|task| task.name == *name) {
+                    let name = format!("{}/{}", self.name, name);
+                    return Err(Error::MissingDependency(name));
+                }
+            }
+        }
+
         let mut pending = self.tasks.clone();
         let mut running = Vec::new();
         let mut finished = Vec::new();
@@ -139,7 +151,7 @@ impl Job {
                 self.status = Status::Finished;
                 return Ok(());
             } else if running.is_empty() {
-                return Err(Error::CircularOrMissingDependencies);
+                return Err(Error::CircularDependency);
             }
         }
     }
@@ -217,6 +229,15 @@ impl Runner {
     pub async fn run(&mut self) -> Result<(), Error> {
         self.status = Status::Running;
 
+        // Check if all dependencies are available
+        for job in &self.jobs {
+            for name in &job.depends {
+                if !self.jobs.iter().any(|job| job.name == *name) {
+                    return Err(Error::MissingDependency(name.clone()));
+                }
+            }
+        }
+
         let mut pending = self.jobs.clone();
         let mut running = Vec::new();
         let mut finished = Vec::new();
@@ -271,7 +292,7 @@ impl Runner {
                 self.status = Status::Finished;
                 return Ok(());
             } else if running.is_empty() {
-                return Err(Error::CircularOrMissingDependencies);
+                return Err(Error::CircularDependency);
             }
         }
     }
@@ -351,10 +372,34 @@ impl Step {
     pub async fn run(&mut self) -> Result<(), Error> {
         match self {
             Step::Command { args } => {
-                let status = tokio::process::Command::new(&args[0])
+                let mut child = tokio::process::Command::new(&args[0])
                     .args(&args[1..])
-                    .status()
-                    .await?;
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()?;
+
+                let stdout = child.stdout.take().unwrap();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stdout);
+                    let mut buffer = String::new();
+                    while reader.read_line(&mut buffer).await.unwrap() > 0 {
+                        print!("{}", buffer);
+                        buffer.clear();
+                    }
+                });
+
+                let stderr = child.stderr.take().unwrap();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stderr);
+                    let mut buffer = String::new();
+                    while reader.read_line(&mut buffer).await.unwrap() > 0 {
+                        eprint!("{}", buffer);
+                        buffer.clear();
+                    }
+                });
+
+                let status = child.wait().await?;
                 if status.success() {
                     Ok(())
                 } else {
