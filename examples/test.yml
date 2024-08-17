@@ -1,0 +1,18 @@
+name: test
+tasks:
+- name: echo 1
+  steps:
+  - args:
+    - echo
+    - Hello, test!
+  - args:
+    - sleep
+    - "1"
+- name: echo 2
+  steps:
+  - args:
+    - echo
+    - Hello, test!
+  - args:
+    - sleep
+    - "1"

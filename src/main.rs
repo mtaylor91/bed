@@ -1,20 +1,9 @@
-use buildexperiments::{Runner, Spec};
+use bed::Loader;
 
 #[tokio::main]
-async fn main() {
-    let mut runner = Runner::new();
-
-    let task = runner.job("Hello, world!".to_string()).task();
-
-    task.step(Spec::command(vec![
-        "echo".to_string(),
-        "Hello".to_string(),
-    ]));
-
-    task.step(Spec::command(vec![
-        "echo".to_string(),
-        "world!".to_string(),
-    ]));
-
-    runner.run().await;
+async fn main() -> Result<(), bed::Error> {
+    let mut loader = Loader::new("examples".to_string());
+    loader.load()?;
+    loader.runner().run().await?;
+    Ok(())
 }

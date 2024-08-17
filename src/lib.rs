@@ -1,8 +1,50 @@
+use serde::Deserialize;
 
+
+#[derive(Debug)]
+pub enum Error {
+    CircularOrMissingDependencies,
+    JobFailed(Job),
+    TaskFailed(Task),
+    Exit(std::process::ExitStatus),
+    Io(std::io::Error),
+    Serde(serde_yml::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Error::CircularOrMissingDependencies =>
+                write!(f, "Circular or missing dependencies"),
+            Error::JobFailed(job) => write!(f, "Job failed: {}", job.name),
+            Error::TaskFailed(task) => write!(f, "Task failed: {}", task.name),
+            Error::Exit(status) => write!(f, "Exit status: {}", status),
+            Error::Io(error) => write!(f, "I/O error: {}", error),
+            Error::Serde(error) => write!(f, "Serde error: {}", error),
+        }
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Error {
+        Error::Io(error)
+    }
+}
+
+impl From<serde_yml::Error> for Error {
+    fn from(error: serde_yml::Error) -> Error {
+        Error::Serde(error)
+    }
+}
+
+
+#[derive(Debug, Deserialize)]
 pub struct Job {
     pub name: String,
+    #[serde(default)]
     pub depends: Vec<String>,
     pub tasks: Vec<Task>,
+    #[serde(default)]
     pub status: Status,
 }
 
@@ -39,29 +81,122 @@ impl Job {
         })
     }
 
-    pub async fn run(mut self) -> Job {
-        if self.status != Status::Pending {
-            return self;
-        }
-
+    pub async fn run(&mut self) -> Result<(), Error> {
         self.status = Status::Running;
 
-        for task in &mut self.tasks {
-            task.run().await;
+        let mut pending = self.tasks.clone();
+        let mut running = Vec::new();
+        let mut finished = Vec::new();
+
+        loop {
+            // Filter out tasks that are ready to run
+            pending.retain(|task| {
+                // Check if the task is ready to run
+                if task.ready(&finished) {
+                    // Clone the task to avoid borrowing issues
+                    let mut task = task.clone();
+                    // Spawn the task to run asynchronously
+                    running.push(tokio::spawn(async move {
+                        match task.run().await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        task
+                    }));
+                    // Remove the task from the pending list
+                    false
+                } else {
+                    // Keep the task in the pending list
+                    true
+                }
+            });
+
+
+            if !running.is_empty() {
+                // Wait for any task to finish
+                let (done, _, rest) = futures::future::select_all(running).await;
+                // Update the running list
+                running = rest;
+                // Match the result of the task
+                match done {
+                    Ok(task) => {
+                        if task.status == Status::Failed {
+                            // Return an error if the task failed
+                            return Err(Error::TaskFailed(task))
+                        } else {
+                            // Add the task to the finished list
+                            finished.push(task);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {:?}", e);
+                    }
+                }
+            } else if pending.is_empty() && running.is_empty() {
+                self.tasks = finished;
+                self.status = Status::Finished;
+                return Ok(());
+            } else if running.is_empty() {
+                return Err(Error::CircularOrMissingDependencies);
+            }
         }
+    }
+}
 
-        self.status = Status::Finished;
 
-        self
+pub struct Loader {
+    pub directory: String,
+    pub jobs: Vec<Job>,
+}
+
+impl Loader {
+    pub fn new(directory: String) -> Loader {
+        Loader {
+            directory,
+            jobs: Vec::new(),
+        }
     }
 
-    pub fn task(&mut self) -> &mut Task {
-        let task = Task {
-            steps: Vec::new(),
-            status: Status::Pending,
-        };
-        self.tasks.push(task);
-        self.tasks.last_mut().unwrap()
+    pub fn load(&mut self) -> Result<(), Error> {
+        let entries = std::fs::read_dir(&self.directory)?;
+
+        for entry in entries {
+            match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if path.is_file() {
+                        match path.extension() {
+                            Some(ext) => {
+                                if ext == "yml" || ext == "yaml" {
+                                    self.load_file(path)?;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(Error::Io(e));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn load_file(&mut self, path: std::path::PathBuf) -> Result<(), Error> {
+        let file = std::fs::File::open(&path)?;
+        let job = serde_yml::from_reader(file)?;
+        self.jobs.push(job);
+        Ok(())
+    }
+
+    pub fn runner(&self) -> Runner {
+        let mut runner = Runner::new();
+        runner.jobs = self.jobs.clone();
+        runner
     }
 }
 
@@ -79,52 +214,66 @@ impl Runner {
         }
     }
 
-    pub async fn run(&mut self) {
-        if self.status != Status::Pending {
-            return;
-        }
-
+    pub async fn run(&mut self) -> Result<(), Error> {
         self.status = Status::Running;
 
         let mut pending = self.jobs.clone();
         let mut running = Vec::new();
         let mut finished = Vec::new();
 
-        while !pending.is_empty() || !running.is_empty() {
+        loop {
+            // Filter out jobs that are ready to run
             pending.retain(|job| {
+                // Check if the job is ready to run
                 if job.ready(&finished) {
-                    let job = job.clone();
+                    // Clone the job to avoid borrowing issues
+                    let mut job = job.clone();
+                    // Spawn the job to run asynchronously
                     running.push(tokio::spawn(async move {
-                        job.run().await
+                        match job.run().await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                eprintln!("Error: {}", e);
+                            }
+                        }
+                        job
                     }));
+                    // Remove the job from the pending list
                     false
                 } else {
+                    // Keep the job in the pending list
                     true
                 }
             });
 
             if !running.is_empty() {
+                // Wait for any job to finish
                 let (done, _, rest) = futures::future::select_all(running).await;
+                // Update the running list
                 running = rest;
-
+                // Match the result of the job
                 match done {
                     Ok(job) => {
-                        finished.push(job);
+                        if job.status == Status::Failed {
+                            // Return an error if the job failed
+                            return Err(Error::JobFailed(job))
+                        } else {
+                            // Add the job to the finished list
+                            finished.push(job);
+                        }
                     }
                     Err(e) => {
                         eprintln!("Error: {:?}", e);
                     }
                 }
             } else if pending.is_empty() && running.is_empty() {
-                break;
+                self.jobs = finished;
+                self.status = Status::Finished;
+                return Ok(());
             } else if running.is_empty() {
-                eprintln!("Error: Circular dependency detected");
-                break;
+                return Err(Error::CircularOrMissingDependencies);
             }
         }
-
-        self.jobs = finished;
-        self.status = Status::Finished;
     }
 
     pub fn job(&mut self, name: String) -> &mut Job {
@@ -140,27 +289,7 @@ impl Runner {
 }
 
 
-pub enum Spec {
-    Command{args: Vec<String>},
-}
-
-impl Clone for Spec {
-    fn clone(&self) -> Spec {
-        match self {
-            Spec::Command { args } => Spec::Command {
-                args: args.clone(),
-            },
-        }
-    }
-}
-
-impl Spec {
-    pub fn command(args: Vec<String>) -> Spec {
-        Spec::Command { args }
-    }
-}
-
-
+#[derive(Debug, Deserialize)]
 pub enum Status {
     Pending,
     Running,
@@ -179,6 +308,12 @@ impl Clone for Status {
     }
 }
 
+impl Default for Status {
+    fn default() -> Status {
+        Status::Pending
+    }
+}
+
 impl PartialEq for Status {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -192,81 +327,60 @@ impl PartialEq for Status {
 }
 
 
-pub struct Step {
-    pub spec: Spec,
-    pub status: Status,
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum Step {
+    Command{args: Vec<String>},
 }
 
 impl Clone for Step {
     fn clone(&self) -> Step {
-        Step {
-            spec: self.spec.clone(),
-            status: self.status.clone(),
+        match self {
+            Step::Command { args } => Step::Command {
+                args: args.clone(),
+            },
         }
     }
 }
 
 impl Step {
-    pub fn new(spec: Spec) -> Step {
-        Step {
-            spec,
-            status: Status::Pending,
-        }
+    pub fn command(args: Vec<String>) -> Step {
+        Step::Command { args }
     }
 
-    pub async fn run(&mut self) {
-        if self.status != Status::Pending {
-            return;
-        }
-
-        self.status = Status::Running;
-
-        match &self.spec {
-            Spec::Command { args } => {
-                let mut command = tokio::process::Command::new(&args[0]);
-                for arg in &args[1..] {
-                    command.arg(arg);
-                }
-
-                let status = command.status().await;
-                match status {
-                    Ok(status) => {
-                        if status.success() {
-                            self.status = Status::Finished;
-                        } else {
-                            self.status = Status::Failed;
-                        }
-                    }
-                    Err(_) => {
-                        self.status = Status::Failed;
-                    }
+    pub async fn run(&mut self) -> Result<(), Error> {
+        match self {
+            Step::Command { args } => {
+                let status = tokio::process::Command::new(&args[0])
+                    .args(&args[1..])
+                    .status()
+                    .await?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(Error::Exit(status))
                 }
             }
         }
-
-        self.status = Status::Finished;
     }
 }
 
-impl std::fmt::Debug for Status {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Status::Pending => write!(f, "Pending"),
-            Status::Running => write!(f, "Running"),
-            Status::Finished => write!(f, "Finished"),
-            Status::Failed => write!(f, "Failed"),
-        }
-    }
-}
 
+#[derive(Debug, Deserialize)]
 pub struct Task {
+    pub name: String,
+    #[serde(default)]
+    pub depends: Vec<String>,
     pub steps: Vec<Step>,
+    #[serde(default)]
     pub status: Status,
 }
 
 impl Clone for Task {
     fn clone(&self) -> Task {
         Task {
+            name: self.name.clone(),
+            depends: self.depends.clone(),
             steps: self.steps.clone(),
             status: self.status.clone(),
         }
@@ -274,24 +388,29 @@ impl Clone for Task {
 }
 
 impl Task {
-    pub async fn run(&mut self) {
-        if self.status != Status::Pending {
-            return;
-        }
+    pub fn ready(&self, finished: &Vec<Task>) -> bool {
+        self.depends.iter().all(|name| {
+            finished.iter().any(|task|
+                task.name == *name && task.status == Status::Finished
+            )
+        })
+    }
 
+    pub async fn run(&mut self) -> Result<(), Error> {
         self.status = Status::Running;
 
         for step in &mut self.steps {
-            step.run().await;
+            match step.run().await {
+                Ok(()) => {}
+                Err(e) => {
+                    self.status = Status::Failed;
+                    return Err(e);
+                }
+            }
         }
-    }
 
-    pub fn step(&mut self, spec: Spec) -> &mut Step {
-        let step = Step {
-            spec: spec,
-            status: Status::Pending,
-        };
-        self.steps.push(step);
-        self.steps.last_mut().unwrap()
+        self.status = Status::Finished;
+
+        Ok(())
     }
 }

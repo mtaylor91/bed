@@ -1,0 +1,9 @@
+name: build
+depends:
+- test
+tasks:
+- name: echo
+  steps:
+  - args:
+    - echo
+    - Hello, build!
