@@ -1,4 +1,4 @@
-use bed::Loader;
+use bed::{Loader, JobTracker};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -12,6 +12,6 @@ async fn main() -> Result<(), bed::Error> {
     let args = Args::parse();
     let mut loader = Loader::new(args.directory);
     loader.load()?;
-    loader.runner().run().await?;
+    loader.runner().run(JobTracker::new()).await?;
     Ok(())
 }
