@@ -3,7 +3,14 @@ depends:
 - test
 tasks:
 - name: cargo-build
+  depends:
+  - sleep
   steps:
   - args:
     - cargo
     - build
+- name: sleep
+  steps:
+  - args:
+    - sleep
+    - "5"

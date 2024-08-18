@@ -32,6 +32,12 @@ impl std::fmt::Display for Error {
     }
 }
 
+impl From<JoinError> for Error {
+    fn from(error: JoinError) -> Error {
+        Error::Join(error)
+    }
+}
+
 impl From<std::io::Error> for Error {
     fn from(error: std::io::Error) -> Error {
         Error::Io(error)
